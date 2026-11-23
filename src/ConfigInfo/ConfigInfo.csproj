@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+    <PropertyGroup>
+        <TargetFramework>net8.0</TargetFramework>
+        <Nullable>enable</Nullable>
+        <ImplicitUsings>enable</ImplicitUsings>
+        <LangVersion>latest</LangVersion>
+        <RootNamespace>ConfigInfo</RootNamespace>
+        <AssemblyName>ConfigInfo</AssemblyName>
+        <Version>1.1.0</Version>
+
+        <!-- ===== AOT / 裁剪适配 =====
+             本库不使用任何反射、动态代码、序列化特性，
+             解析与写出全部为手写的 Span 扫描代码，NativeAOT 下零警告。 -->
+        <IsAotCompatible>true</IsAotCompatible>
+        <IsTrimmable>true</IsTrimmable>
+
+        <!-- 生成 XML 文档便于调用方获得智能提示 -->
+        <GenerateDocumentationFile>true</GenerateDocumentationFile>
+        <NoWarn>$(NoWarn);CS1591</NoWarn>
+
+        <Product>ConfigInfo</Product>
+        <Description>面向 AOT 的轻量文本配置库（.cif 格式）：零反射、单遍解析、宽松类型转换。</Description>
+    </PropertyGroup>
+</Project>

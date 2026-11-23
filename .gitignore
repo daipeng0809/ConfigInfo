@@ -1,0 +1,14 @@
+# 构建输出
+bin/
+obj/
+publish/
+
+# IDE
+.vs/
+.idea/
+*.user
+*.suo
+
+# 系统
+.DS_Store
+Thumbs.db
