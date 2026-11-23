@@ -699,6 +699,18 @@ catch (ConfigFormatException ex)
 - 可直接用于 NativeAOT / IL 裁剪项目；`ConfigValue` 的转换全部为手写代码。
 - 对象映射需要手写 `SaveTo` / `LoadFrom`（见 3.4），这也是 AOT 下最稳妥的方式。
 
+跨平台：
+
+- 只使用 BCL 跨平台 API（`File` / `Path` / `UTF8Encoding`），无 `P/Invoke`、注册表、Win32 或
+  `System.Windows` 依赖；数字格式化/解析固定使用 `InvariantCulture`，换行固定输出 `LF`，
+  文件固定 UTF-8 无 BOM，因此同一份配置文本在各系统上语义一致。
+- 已验证：`win-x64` + `TrimMode=full` 裁剪发布 0 警告，裁剪产物运行内置自测 61/61 通过；
+  `linux-x64` 交叉发布生成有效 ELF 可执行文件。
+
+NativeAOT 发布的前置条件是目标平台的 C++ 工具链（Windows 为 MSVC 链接器）。若 `PublishAot=true`
+在最后的原生链接步骤报 `Platform linker not found`，请安装 Visual Studio 的
+“使用 C++ 的桌面开发”工作负载后重试；AOT/裁剪分析器本身已是 0 警告。
+
 体验 NativeAOT 发布：
 
 ```powershell
@@ -804,6 +816,7 @@ ConfigInfo.sln
 | --- | --- |
 | 库版本 | 1.1.0（完整审计后） |
 | 目标框架 | `net8.0` |
+| 支持平台 | Windows / Linux / macOS（任何 .NET 8 支持的平台；无平台专用 API） |
 | 语言版本 | `latest`（使用文件作用域命名空间、集合表达式等） |
 | 文件格式 | `.cif` 1.0（向后兼容；本次仅修复缺陷，未引入不兼容的语法变更） |
 | 依赖 | 无 |
@@ -1488,6 +1501,20 @@ Both `Parse` and `ToText` are O(n).
 - Safe for NativeAOT and IL trimming; all conversions are hand-written.
 - Object mapping is manual (`SaveTo` / `LoadFrom`), which is the safest pattern under AOT.
 
+Cross-platform:
+
+- Only portable BCL APIs are used (`File` / `Path` / `UTF8Encoding`); there is no `P/Invoke`,
+  registry, Win32, or `System.Windows` dependency. Numbers always use `InvariantCulture`,
+  output always uses `LF`, and files are always UTF-8 without BOM, so the same configuration
+  text has identical semantics on every OS.
+- Verified: `win-x64` + `TrimMode=full` produces a trimmed app with 0 warnings whose
+  self-test passes 61/61; `linux-x64` cross-publish produces a valid ELF executable.
+
+NativeAOT requires the C++ toolchain of the target platform (the MSVC linker on Windows).
+If `PublishAot=true` stops at the native link step with `Platform linker not found`, install
+the “Desktop development with C++” workload in Visual Studio and retry; the AOT/trim
+analyzers themselves already report 0 warnings.
+
 Try a NativeAOT publish:
 
 ```powershell
@@ -1573,6 +1600,7 @@ Verification: **65** xUnit tests, **61** sample self-test assertions, build with
 | --- | --- |
 | Library version | 1.1.0 (after the full audit) |
 | Target framework | `net8.0` |
+| Supported platforms | Windows / Linux / macOS (any platform supported by .NET 8; no OS-specific APIs) |
 | Language version | `latest` (file-scoped namespaces, collection expressions, …) |
 | File format | `.cif` 1.0 (backward compatible; this release only fixes defects) |
 | Dependencies | None |
