@@ -6,11 +6,11 @@
         <LangVersion>latest</LangVersion>
         <RootNamespace>ConfigInfo</RootNamespace>
         <AssemblyName>ConfigInfo</AssemblyName>
-        <Version>1.1.0</Version>
+        <Version>1.2.0</Version>
 
         <!-- ===== AOT / 裁剪适配 =====
-             本库不使用任何反射、动态代码、序列化特性，
-             解析与写出全部为手写的 Span 扫描代码，NativeAOT 下零警告。 -->
+             核心解析/写出不使用反射、动态代码或序列化特性，NativeAOT 下零警告；
+             ConfigFile 自动映射是额外的反射便捷层，已单独标注 RequiresUnreferencedCode / RequiresDynamicCode。 -->
         <IsAotCompatible>true</IsAotCompatible>
         <IsTrimmable>true</IsTrimmable>
 
@@ -19,6 +19,6 @@
         <NoWarn>$(NoWarn);CS1591</NoWarn>
 
         <Product>ConfigInfo</Product>
-        <Description>面向 AOT 的轻量文本配置库（.cif 格式）：零反射、单遍解析、宽松类型转换。</Description>
+        <Description>面向 AOT 的轻量文本配置库（.cif 格式）：核心零反射、单遍解析、宽松类型转换，支持注释读写、自动注释与可选自动对象映射。</Description>
     </PropertyGroup>
 </Project>

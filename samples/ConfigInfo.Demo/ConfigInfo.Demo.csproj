@@ -7,9 +7,14 @@
         <LangVersion>latest</LangVersion>
         <RootNamespace>ConfigInfo.Demo</RootNamespace>
 
-        <!-- 库本身零反射；体验 NativeAOT 发布可执行：
+        <!-- 库核心零反射；体验 NativeAOT 发布可执行：
              dotnet publish -c Release -r win-x64 -p:PublishAot=true -->
         <IsAotCompatible>true</IsAotCompatible>
+
+        <!-- 示例使用 ConfigFile 自动映射（反射便捷层，已标注 RequiresUnreferencedCode）。
+             示例模型为扁平类且泛型参数带 DynamicallyAccessedMembers，成员元数据会被保留；
+             NativeAOT 项目请改用 README 3.4 节的手写 SaveTo / LoadFrom。 -->
+        <NoWarn>$(NoWarn);IL2026;IL3050</NoWarn>
     </PropertyGroup>
 
     <ItemGroup>

@@ -21,6 +21,8 @@ internal static class SelfTest
         TestErrors();
         TestRoundtrip();
         TestFileSaveLoad();
+        TestModelMapping();
+        TestComments();
         Console.WriteLine($"自测结束：通过 {_passed}，失败 {_failed}");
         return _failed == 0 ? 0 : 1;
     }
@@ -246,6 +248,87 @@ internal static class SelfTest
             Check("TryLoad 失败返回错误",
                 !ConfigDocument.TryLoad(Path.Combine(dir, "missing.cif"), out _, out string? error)
                 && !string.IsNullOrEmpty(error));
+        }
+        finally
+        {
+            if (Directory.Exists(dir))
+                Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    private static void TestModelMapping()
+    {
+        Console.WriteLine("-- 类自动映射 --");
+        var settings = new AppSettings { ComPort = "COM7", BaudRate = 115200, FrameHead = [0xAA, 0x55] };
+
+        ConfigObject root = ConfigFile.ToObject(settings);
+        Check("类直接生成分组", root.GetString("serial.port") == "COM7");
+        Check("自动映射数字", root.GetInt32("serial.baudRate") == 115200);
+        Check("自动映射数组", root.GetPath("serial.frameHead").AsArray().ToInt32Array() is [0xAA, 0x55]);
+        Check("忽略成员不写出", !root.ContainsKey("isConnected"));
+
+        string text = ConfigFile.ToText(settings, includeHeader: false);
+        AppSettings again = ConfigFile.Parse<AppSettings>(text);
+        Check("自动映射文本往返", again.ComPort == "COM7" && again.BaudRate == 115200 && again.FrameHead is [0xAA, 0x55]);
+        Check("未写键保留默认值", again.SendInterval == 1000 && again.ThemeVariant == "Light");
+
+        AppSettings partial = ConfigFile.Parse<AppSettings>("[serial]\nport = COM9\nbaudRate = \"57600\"");
+        Check("手写字符串数字直接读成 int", partial.BaudRate == 57600);
+        Check("部分配置其余字段保持默认", partial.ComPort == "COM9" && partial.SendInterval == 1000);
+
+        string dir = Path.Combine(Path.GetTempPath(), "ConfigInfoModel_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            string path = Path.Combine(dir, "app.cif");
+            ConfigFile.Save(path, settings);
+            AppSettings loaded = ConfigFile.Load<AppSettings>(path);
+            Check("读取文件直接生成类", loaded.ComPort == "COM7" && loaded.TcpRemotePort == 8080);
+
+            AppSettings fallback = ConfigFile.LoadOrDefault<AppSettings>(
+                Path.Combine(dir, "missing.cif"), out string? error);
+            Check("LoadOrDefault 缺失文件返回默认值", fallback.BaudRate == 9600 && error is not null);
+        }
+        finally
+        {
+            if (Directory.Exists(dir))
+                Directory.Delete(dir, recursive: true);
+        }
+    }
+
+    private static void TestComments()
+    {
+        Console.WriteLine("-- 注释读写 --");
+        var document = new ConfigDocument();
+        document.Root.Comment = "文件说明";
+        document.Root["port"] = 8080;
+        document.Root.SetComment("port", "监听端口");
+        document.Root.SetInlineComment("port", "1-65535");
+
+        string text = document.ToText(includeHeader: false);
+        Check("写出文件级注释", text.Contains("# 文件说明", StringComparison.Ordinal));
+        Check("写出条目与行尾注释",
+            text.Contains("# 监听端口", StringComparison.Ordinal)
+            && text.Contains("# 1-65535", StringComparison.Ordinal));
+
+        ConfigObject again = ConfigDocument.Parse(text).Root;
+        Check("读取文件级条目与行尾注释",
+            again.Comment == "文件说明"
+            && again.GetComment("port") == "监听端口"
+            && again.GetInlineComment("port") == "1-65535");
+
+        string dir = Path.Combine(Path.GetTempPath(), "ConfigInfoComment_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            string path = Path.Combine(dir, "app.cif");
+            document.Save(path);
+
+            ConfigDocument loaded = ConfigDocument.Load(path);
+            Check("标准头不会被当作普通注释", loaded.Root.Comment == "文件说明");
+
+            loaded.Save(path);
+            string content = File.ReadAllText(path);
+            Check("标准头只保留一份",
+                content.Split("# ConfigInfo 配置文件").Length - 1 == 1);
         }
         finally
         {

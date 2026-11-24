@@ -39,16 +39,34 @@ internal ref struct ConfigParser
         var root = new ConfigObject();
         ConfigObject current = root;
         int currentDepth = 0;
+        bool atStart = true;
+
+        SkipGeneratedHeader();
+
         while (true)
         {
-            SkipTrivia(includeNewLines: true);
+            ReadLeadingComments(out string? detached, out string? attached);
+            string? leading = JoinComments(detached, attached);
             if (AtEnd)
+            {
+                if (atStart)
+                {
+                    // 没有条目时：空行分隔的前一块仍属于文件头，最后一块属于文件尾
+                    root.Comment = detached;
+                    root.TrailingComment = attached;
+                }
+                else
+                {
+                    root.TrailingComment = leading;
+                }
                 break;
+            }
 
             char c = Peek;
             if (c == '[')
             {
-                (current, currentDepth) = ParseSectionHeader(root);
+                (current, currentDepth) = ParseSectionHeader(root, leading);
+                atStart = false;
                 continue;
             }
 
@@ -61,16 +79,18 @@ internal ref struct ConfigParser
             if (AtEnd || IsLineBreak(Peek))
                 throw Error($"键 \"{key}\" 后缺少 '=' 或 '{{'。");
 
+            ConfigValue value;
+            string? inlineComment = null;
             if (Peek == '{')
             {
                 _pos++;
-                ConfigObject child = ParseObjectBody(currentDepth + 1);
-                Assign(current, currentDepth, key, new ConfigValue(child), quoted, keyStart);
+                inlineComment = ReadInlineComment();
+                value = new ConfigValue(ParseObjectBody(currentDepth + 1));
             }
             else if (Peek == '=')
             {
                 _pos++;
-                Assign(current, currentDepth, key, ParseValue(currentDepth), quoted, keyStart);
+                value = ParseValue(currentDepth, out inlineComment);
             }
             else if (Peek == ':')
             {
@@ -81,15 +101,62 @@ internal ref struct ConfigParser
                 throw Error($"键 \"{key}\" 后应为 '=' 或 '{{'，实际为 '{Peek}'。");
             }
 
-            FinishLine();
+            (ConfigObject target, string actualKey) =
+                Assign(current, currentDepth, key, value, quoted, keyStart);
+
+            if (atStart)
+                root.Comment = detached;
+            else if (leading is not null)
+                target.SetComment(actualKey, leading);
+
+            if (atStart && attached is not null)
+                target.SetComment(actualKey, attached);
+
+            if (inlineComment is not null)
+                target.SetInlineComment(actualKey, inlineComment);
+
+            atStart = false;
+            string? trailing = FinishLine();
+            if (trailing is not null)
+            {
+                string? existing = target.GetInlineComment(actualKey);
+                target.SetInlineComment(actualKey, existing is null ? trailing : existing + " " + trailing);
+            }
         }
 
         return root;
     }
 
+    /// <summary>跳过库生成的标准头注释；不匹配时不移动位置。</summary>
+    private void SkipGeneratedHeader()
+    {
+        int position = _pos;
+        foreach (string expected in ConfigHeader.Lines)
+        {
+            int end = position;
+            while (end < _text.Length && !IsLineBreak(_text[end]))
+                end++;
+
+            if (!_text[position..end].SequenceEqual(expected))
+                return;
+
+            if (end < _text.Length)
+            {
+                if (_text[end] == '\r' && end + 1 < _text.Length && _text[end + 1] == '\n')
+                    end += 2;
+                else
+                    end++;
+            }
+
+            position = end;
+        }
+
+        _pos = position;
+    }
+
     // ===== 表头 [section.path] =====
 
-    private (ConfigObject Node, int Depth) ParseSectionHeader(ConfigObject root)
+    private (ConfigObject Node, int Depth) ParseSectionHeader(ConfigObject root, string? comment)
     {
         _pos++; // '['
         int start = _pos;
@@ -106,6 +173,8 @@ internal ref struct ConfigParser
         _pos++; // ']'
 
         ConfigObject node = root;
+        ConfigObject parent = root;
+        string lastKey = string.Empty;
         int depth = 0;
         while (true)
         {
@@ -116,15 +185,24 @@ internal ref struct ConfigParser
 
             depth++;
             CheckNestingDepth(depth);
-            node = EnterObject(node, segment.ToString(), $"表头 [{raw.ToString()}]", _pos);
+            lastKey = segment.ToString();
+            parent = node;
+            node = EnterObject(node, lastKey, $"表头 [{raw.ToString()}]", _pos);
             if (dot < 0)
                 break;
             raw = raw[(dot + 1)..];
         }
 
-        SkipTrivia(includeNewLines: false);
+        SkipInlineSpace();
+        string? inline = ReadInlineComment();
         if (!AtEnd && !IsLineBreak(Peek))
             throw Error($"表头 ']' 后存在多余内容 '{Peek}'。");
+
+        if (comment is not null)
+            parent.SetComment(lastKey, comment);
+        if (inline is not null)
+            parent.SetInlineComment(lastKey, inline);
+
         return (node, depth);
     }
 
@@ -157,12 +235,14 @@ internal ref struct ConfigParser
         var obj = new ConfigObject();
         while (true)
         {
-            SkipTrivia(includeNewLines: true);
+            ReadLeadingComments(out string? detached, out string? attached);
+            string? leading = JoinComments(detached, attached);
             if (AtEnd)
                 throw Error("对象缺少 '}'。");
             if (Peek == '}')
             {
                 _pos++;
+                obj.TrailingComment = leading;
                 return obj;
             }
 
@@ -177,15 +257,18 @@ internal ref struct ConfigParser
             if (AtEnd || IsLineBreak(Peek))
                 throw Error($"键 \"{key}\" 后缺少 '=' 或 '{{'。");
 
+            ConfigValue value;
+            string? inlineComment = null;
             if (Peek == '=')
             {
                 _pos++;
-                Assign(obj, depth, key, ParseValue(depth), quoted, keyStart);
+                value = ParseValue(depth, out inlineComment);
             }
             else if (Peek == '{')
             {
                 _pos++;
-                Assign(obj, depth, key, new ConfigValue(ParseObjectBody(depth + 1)), quoted, keyStart);
+                inlineComment = ReadInlineComment();
+                value = new ConfigValue(ParseObjectBody(depth + 1));
             }
             else if (Peek == ':')
             {
@@ -196,7 +279,22 @@ internal ref struct ConfigParser
                 throw Error($"键 \"{key}\" 后应为 '=' 或 '{{'，实际为 '{Peek}'。");
             }
 
-            SkipTrivia(includeNewLines: true);
+            (ConfigObject target, string actualKey) =
+                Assign(obj, depth, key, value, quoted, keyStart);
+
+            if (leading is not null)
+                target.SetComment(actualKey, leading);
+            if (inlineComment is not null)
+                target.SetInlineComment(actualKey, inlineComment);
+
+            string? trailing = ReadInlineComment();
+            if (trailing is not null)
+            {
+                string? existing = target.GetInlineComment(actualKey);
+                target.SetInlineComment(actualKey, existing is null ? trailing : existing + " " + trailing);
+            }
+
+            SkipWhitespace(includeNewLines: true);
             if (!AtEnd && Peek == ',')
                 _pos++; // 容忍 JSON 风格逗号
         }
@@ -212,7 +310,7 @@ internal ref struct ConfigParser
 
     // ===== 值 =====
 
-    private ConfigValue ParseValue(int depth)
+    private ConfigValue ParseValue(int depth, out string? inlineComment)
     {
         // 值必须与 '=' 同行开始：不跨行、也不跳过注释。
         // 否则 "a =\n# 注释\nb = 2" 会把下一行的 "b = 2" 当成 a 的值，造成静默错乱。
@@ -221,18 +319,20 @@ internal ref struct ConfigParser
         if (AtEnd)
             throw Error("缺少值。");
 
+        inlineComment = null;
         return Peek switch
         {
             '"' or '\'' => new ConfigValue(ParseQuotedString()),
             '[' => new ConfigValue(ParseArray(depth + 1)),
-            '{' => ParseInlineObject(depth + 1),
+            '{' => ParseInlineObject(depth + 1, out inlineComment),
             _ => ParseBareValue(),
         };
     }
 
-    private ConfigValue ParseInlineObject(int depth)
+    private ConfigValue ParseInlineObject(int depth, out string? inlineComment)
     {
         _pos++; // '{'
+        inlineComment = ReadInlineComment();
         return new ConfigValue(ParseObjectBody(depth));
     }
 
@@ -252,7 +352,7 @@ internal ref struct ConfigParser
                 return array;
             }
 
-            array.Add(ParseValue(depth));
+            array.Add(ParseValue(depth, out _));
 
             SkipTrivia(includeNewLines: true);
             if (AtEnd)
@@ -371,13 +471,14 @@ internal ref struct ConfigParser
     /// 赋值：裸键中的 '.' 自动展开为嵌套对象（与 [a.b] 表头一致）；引号键保持字面键名。
     /// <paramref name="targetDepth"/> 为目标容器的嵌套层级，用于限制整体深度。
     /// </summary>
-    private void Assign(ConfigObject target, int targetDepth, string key, ConfigValue value, bool quoted, int keyPosition)
+    private (ConfigObject Target, string Key) Assign(ConfigObject target, int targetDepth, string key,
+        ConfigValue value, bool quoted, int keyPosition)
     {
         if (quoted || key.AsSpan().IndexOf('.') < 0)
         {
             CheckNestingDepth(targetDepth + 1, keyPosition);
             target.Set(key, value);
-            return;
+            return (target, key);
         }
 
         int segmentCount = 1;
@@ -405,7 +506,10 @@ internal ref struct ConfigParser
 
         if (remaining.IsEmpty)
             throw ErrorAt($"键 \"{key}\" 以 '.' 结尾。", keyPosition);
-        node.Set(remaining.ToString(), value);
+
+        string finalKey = remaining.ToString();
+        node.Set(finalKey, value);
+        return (node, finalKey);
     }
 
     private string ParseQuotedString()
@@ -535,30 +639,163 @@ internal ref struct ConfigParser
             _pos++;
     }
 
-    private void FinishLine()
+    /// <summary>只跳过空白（可选换行），不消耗注释；用于条目之间保留注释。</summary>
+    private void SkipWhitespace(bool includeNewLines)
     {
-        SkipTrivia(includeNewLines: false);
-        if (!AtEnd && Peek == ',')
+        while (!AtEnd)
         {
-            _pos++; // 容忍 JSON 风格逗号
-            SkipTrivia(includeNewLines: false);
+            char c = Peek;
+            if (c == ' ' || c == '\t')
+            {
+                _pos++;
+                continue;
+            }
+
+            if (IsLineBreak(c))
+            {
+                if (!includeNewLines)
+                    return;
+                _pos++;
+                continue;
+            }
+
+            return;
+        }
+    }
+
+    /// <summary>
+    /// 跳过空白与注释，并把注释拆成两块：
+    /// <paramref name="detached"/> 为与后续条目之间隔了空行的块，<paramref name="attached"/> 为紧贴后续条目的块。
+    /// 两块的每行都已去掉注释符号与首尾空白，多行用 '\n' 连接；没有注释时为 <c>null</c>。
+    /// </summary>
+    private void ReadLeadingComments(out string? detached, out string? attached)
+    {
+        StringBuilder? current = null;
+        StringBuilder? earlier = null;
+        int lineBreaks = 0;
+
+        while (!AtEnd)
+        {
+            char c = Peek;
+            if (c == ' ' || c == '\t')
+            {
+                _pos++;
+                continue;
+            }
+
+            if (IsLineBreak(c))
+            {
+                // CRLF 只算一次换行，否则连续注释会被误判为空行分隔
+                if (c == '\r' && _pos + 1 < _text.Length && _text[_pos + 1] == '\n')
+                    _pos += 2;
+                else
+                    _pos++;
+                lineBreaks++;
+                continue;
+            }
+
+            if (c == '#' || (c == '/' && PeekAt(1) == '/'))
+            {
+                // 与上一块之间隔了空行：上一块不再属于紧随的条目
+                if (lineBreaks >= 2 && current is not null)
+                {
+                    earlier ??= new StringBuilder();
+                    if (earlier.Length > 0)
+                        earlier.Append('\n');
+                    earlier.Append(current);
+                    current.Clear();
+                }
+
+                string text = ReadCommentLine();
+                if (text.Length > 0)
+                {
+                    current ??= new StringBuilder();
+                    if (current.Length > 0)
+                        current.Append('\n');
+                    current.Append(text);
+                }
+
+                lineBreaks = 0;
+                continue;
+            }
+
+            break;
         }
 
+        // 注释与后续条目之间隔了空行：整块移到 detached
+        if (lineBreaks >= 2 && current is not null)
+        {
+            earlier ??= new StringBuilder();
+            if (earlier.Length > 0)
+                earlier.Append('\n');
+            earlier.Append(current);
+            current.Clear();
+        }
+
+        detached = earlier?.ToString();
+        attached = current is { Length: > 0 } ? current.ToString() : null;
+    }
+
+    private static string? JoinComments(string? first, string? second)
+        => first is null ? second : second is null ? first : first + '\n' + second;
+
+    /// <summary>读取当前位置的注释内容（不含注释符号），停在行尾。</summary>
+    private string ReadCommentLine()
+    {
+        _pos += Peek == '#' ? 1 : 2;
+        if (!AtEnd && Peek == ' ')
+            _pos++;
+
+        int start = _pos;
+        while (!AtEnd && !IsLineBreak(Peek))
+            _pos++;
+        return _text[start.._pos].ToString().Trim();
+    }
+
+    /// <summary>读取同一行尾部的注释；没有注释时返回 <c>null</c>（不消费换行）。</summary>
+    private string? ReadInlineComment()
+    {
+        SkipInlineSpace();
         if (AtEnd)
-            return;
+            return null;
+        return Peek == '#' || (Peek == '/' && PeekAt(1) == '/')
+            ? ReadCommentLine()
+            : null;
+    }
+
+    private string? FinishLine()
+    {
+        SkipInlineSpace();
+        string? comment = null;
+
+        if (!AtEnd && (Peek == '#' || (Peek == '/' && PeekAt(1) == '/')))
+        {
+            comment = ReadCommentLine();
+        }
+        else if (!AtEnd && Peek == ',')
+        {
+            _pos++; // 容忍 JSON 风格逗号
+            SkipInlineSpace();
+            if (!AtEnd && (Peek == '#' || (Peek == '/' && PeekAt(1) == '/')))
+                comment = ReadCommentLine();
+        }
+
+        SkipInlineSpace();
+        if (AtEnd)
+            return comment;
 
         if (Peek == '\r')
         {
             _pos++;
             if (!AtEnd && Peek == '\n')
                 _pos++;
-            return;
+            return comment;
         }
 
         if (Peek == '\n')
         {
             _pos++;
-            return;
+            return comment;
         }
 
         throw Error($"值后存在多余内容 '{Peek}'。");

@@ -21,20 +21,27 @@ internal static class Program
     {
         string path = Path.Combine(AppContext.BaseDirectory, "Config", "app.cif");
 
-        // ===== 1. 创建配置并保存 =====
+        // ===== 1. 创建配置并保存：类 → 配置对象（[Description] 自动转注释） =====
         Console.WriteLine("==== 1. 创建 AppSettings 并保存为 .cif ====");
         var settings = new AppSettings();
-        var document = new ConfigDocument();
-        settings.SaveTo(document.Root);
-        document.Save(path);
+        ConfigObject root = ConfigFile.ToObject(settings);
+        root.Comment = "本文件由 ConfigInfo 生成，可直接编辑。";
+        root.SetComment("app", "应用信息");
+        root.SetComment("serial", "串口参数");
+        root.GetObject("serial").SetInlineComment("baudRate", "波特率：9600 / 115200");
+        root.GetObject("network").SetComment("tcp", "TCP 连接参数");
+        new ConfigDocument(root).Save(path);
         Console.WriteLine($"已保存：{path}");
         Console.WriteLine();
         Console.WriteLine("---- 文件内容 ----");
         Console.WriteLine(File.ReadAllText(path));
 
-        // ===== 2. 读取配置（宽松类型转换） =====
+        // ===== 2. 读取配置：文件 → 类，同时可读出注释 =====
         Console.WriteLine("==== 2. 读取配置 ====");
-        AppSettings loaded = AppSettings.LoadFrom(ConfigDocument.Load(path).Root);
+        ConfigDocument loadedDocument = ConfigDocument.Load(path);
+        AppSettings loaded = ConfigFile.FromObject<AppSettings>(loadedDocument.Root);
+        Console.WriteLine($"文件注释：{loadedDocument.Root.Comment}");
+        Console.WriteLine($"串口注释：{loadedDocument.Root.GetComment("serial")}；波特率行尾：{loadedDocument.Root.GetObject("serial").GetInlineComment("baudRate")}");
         Console.WriteLine($"应用：{loaded.AppName} {loaded.AppVersion}，主题 {loaded.ThemeVariant}");
         Console.WriteLine($"串口：{loaded.ComPort} @ {loaded.BaudRate}，{loaded.DataBits} 数据位，校验 {loaded.Parity}，停止位 {loaded.StopBits}");
         Console.WriteLine($"TCP：{loaded.TcpMode} → {loaded.TcpRemoteIp}:{loaded.TcpRemotePort}");
@@ -42,16 +49,16 @@ internal static class Program
         Console.WriteLine($"发送间隔：{loaded.SendInterval} ms，文本显示：{loaded.DisplayAsText}");
         Console.WriteLine();
 
-        // ===== 3. 修改后再次保存（原子写入，失败不会损坏原文件） =====
+        // ===== 3. 修改后再次保存（保留注释，原子写入） =====
         Console.WriteLine("==== 3. 修改并再次保存 ====");
-        loaded.ComPort = "COM7";
-        loaded.BaudRate = 115200;
-        loaded.TcpRemotePort = 9000;
-        var changed = new ConfigDocument();
-        loaded.SaveTo(changed.Root);
-        changed.Save(path);
-        var verify = ConfigDocument.Load(path);
-        Console.WriteLine($"重新读取：{verify.Root.GetString("serial.port")} @ {verify.Root.GetInt32("serial.baudRate")}，远端端口 {verify.Root.GetInt32("network.tcp.remotePort")}");
+        ConfigDocument document = ConfigDocument.Load(path);
+        document.Root.SetPath("serial.port", "COM7");
+        document.Root.SetPath("serial.baudRate", 115200);
+        document.Root.SetPath("network.tcp.remotePort", 9000);
+        document.Save(path);
+        AppSettings verify = ConfigFile.Load<AppSettings>(path);
+        Console.WriteLine($"重新读取：{verify.ComPort} @ {verify.BaudRate}，远端端口 {verify.TcpRemotePort}");
+        Console.WriteLine($"注释仍在：{document.Root.GetComment("serial")} / {document.Root.GetObject("serial").GetInlineComment("baudRate")}");
         Console.WriteLine();
 
         // ===== 4. 手工编辑容错演示 =====
@@ -73,6 +80,10 @@ internal static class Program
         Console.WriteLine($"network.tcp.remotePort（0x1F90）→ int：{userDoc.Root.GetInt32("network.tcp.remotePort")}");
         Console.WriteLine($"raw 值：{userDoc.Root.GetString("network.tcp.remoteIp")}");
         Console.WriteLine($"缺失键取默认值：localIp = {userDoc.Root.GetString("network.tcp.localIp", "0.0.0.0")}");
+
+        // 同一份手写文本也可以直接生成类：未写的键保留字段默认值
+        AppSettings tolerant = ConfigFile.Parse<AppSettings>(handwritten);
+        Console.WriteLine($"自动映射：{tolerant.ComPort} @ {tolerant.BaudRate}，远端端口 {tolerant.TcpRemotePort}，主题默认值 {tolerant.ThemeVariant}");
         Console.WriteLine();
 
         // ===== 5. 性能 =====

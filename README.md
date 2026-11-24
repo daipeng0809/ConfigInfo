@@ -1,7 +1,7 @@
 # ConfigInfo
 
-**面向 NativeAOT 的零反射 .cif 文本配置库**  
-A zero-reflection `.cif` text configuration library designed for NativeAOT.
+**面向 NativeAOT 的 .cif 文本配置库（核心零反射，另带一行式自动映射）**  
+A `.cif` text configuration library with a zero-reflection core and an optional one-line object mapper.
 
 [中文说明](#中文说明) · [English Manual](#english-manual)
 
@@ -34,7 +34,7 @@ A zero-reflection `.cif` text configuration library designed for NativeAOT.
 ## 1. 项目简介
 
 `ConfigInfo` 是一个纯 C# 的轻量文本配置库，使用自定义的 `.cif`（ConfigInfo Format）文本格式，
-面向**手工编辑友好**、**零反射**、**NativeAOT / 裁剪安全**的场景。
+面向**手工编辑友好**、**核心零反射**、**NativeAOT / 裁剪安全**的场景，并提供可选的反射自动映射便捷层。
 
 它适合桌面工具、串口/网络调试助手、嵌入式上位机等“配置量不大、但需要用户能直接改文件”的程序。
 
@@ -54,14 +54,16 @@ A zero-reflection `.cif` text configuration library designed for NativeAOT.
 | --- | --- |
 | 数据类型 | `null`、布尔、64 位整数、双精度浮点、字符串、数组、有序对象 |
 | 文本格式 | `.cif`：`key = value`、`[section.path]`、`key { ... }`、`[1, 2, 3]`、`{ a = 1 }` |
-| 注释 | `#` 与 `//`（整行或行尾） |
+| 注释 | `#` 与 `//`（整行或行尾）；可读写，`Load → Save` 保留条目注释 |
 | 字符串 | 双引号（含 `\n`、`\uXXXX` 等转义）与单引号（字面量，适合 Windows 路径） |
 | 数字 | 十进制、`0x` / `0b` / `0o`、`_` 数字分隔符、`NaN` / `±Infinity` |
 | 读取方式 | 字面键、点路径（`serial.tcp.port`）、强类型 `As*`、宽松 `Get*`（带默认值） |
+| 对象映射 | `ConfigFile.Save(path, 类)` / `ConfigFile.Load<T>(path)` 自动映射；`[ConfigName]` / `[ConfigIgnore]` 微调 |
+| 自动注释 | `[Description]` / XML `<summary>` 自动写成条目注释，`includeModelComments` 可关闭 |
 | 写出 | 保持插入顺序；数组短则单行、长则自动多行；字符串自动加引号与转义 |
 | 文件 | UTF-8 无 BOM 保存；自动识别 UTF-8 / UTF-16 BOM；原子替换保存 |
 | 诊断 | `ConfigFormatException` 带 `Line` / `Column`（从 1 开始） |
-| AOT | 不使用反射、`dynamic`、`JsonSerializer`、源生成器；`IsAotCompatible` |
+| AOT | 核心解析/写出零反射；`ConfigFile` 自动映射为反射便捷层（标注 RUC/RDC，AOT 用手写映射） |
 
 ## 3. 快速开始
 
@@ -115,13 +117,57 @@ root.SetPath("network.tcp.remotePort", 9000);            // 中间层自动创�
 document.Save("config/app.cif");
 ```
 
-### 3.4 强类型映射（无反射）
+### 3.4 强类型映射：类直接交给库（推荐）
 
-库刻意不提供“反射式对象映射”，请手写一个 `SaveTo` / `LoadFrom`（约 30 行），
-这样在 NativeAOT 下完全安全，也便于处理默认值与旧版本兼容。
-完整示例见 [`samples/ConfigInfo.Demo/AppSettings.cs`](samples/ConfigInfo.Demo/AppSettings.cs)。
+不需要基类、接口、源生成器或任何配置：把普通类交给 `ConfigFile` 就能保存，读取文件时直接生成类。
 
 ```csharp
+internal sealed class AppSettings
+{
+    public string ComPort = "COM1";                         // → comPort
+    public int BaudRate = 9600;                             // → baudRate
+    public byte[] FrameHead = [0xAA, 0x55];                 // → frameHead = [170, 85]
+    public SerialSettings Serial = new();                   // → serial { ... }
+
+    [ConfigName("network.remoteIp")] public string RemoteIp = "127.0.0.1";
+    [ConfigIgnore] public bool IsConnected;                 // 不写出、不读取
+}
+
+internal sealed class SerialSettings
+{
+    public int DataBits = 8;                                // → serial.dataBits
+    public string Parity = "None";                          // → serial.parity
+}
+
+var settings = new AppSettings { ComPort = "COM7" };
+ConfigFile.Save("config/app.cif", settings);                // 类 → 文件（默认原子替换）
+
+AppSettings loaded = ConfigFile.Load<AppSettings>("config/app.cif");   // 文件 → 类
+
+// 文件缺失/损坏时不抛异常，返回带字段默认值的实例：
+AppSettings safe = ConfigFile.LoadOrDefault("config/app.cif", out string? error);
+```
+
+映射规则：
+
+- 映射公共实例字段与公共可读写属性；键名默认是成员名首字母小写（`ComPort` → `comPort`）。
+- 嵌套类成员 → 子对象；`T[]` / `List<T>` → 数组；元素可以是标量或嵌套对象。
+- 支持 `string`、`bool`、全部整数、`float`、`double`、`decimal`、枚举（写名称）、可空值类型、数组、`List<T>`、嵌套类。
+- 读取时缺失的键保留 `new T()` 的默认值；键名先精确匹配、再忽略大小写匹配；未知键忽略。
+- 沿用宽松转换：`"115200"`、`0x1F90` 都能读成整数；收窄溢出按目标类型范围截断。
+- `[ConfigName("serial.port")]` 可改名或用点路径，把扁平类直接写成分组；`[ConfigIgnore]` 排除成员。
+- 点路径必须合法（不能以 `.` 开头/结尾、不能有 `..`），且不能与同一类型的其他成员键互为前缀
+  （如同时存在 `serial` 与 `serial.port` 会直接报错，避免写出时互相覆盖）。
+- 根对象写出使用**运行时类型**：以基类/接口变量调用 `ToObject`/`Save` 不会丢失根级派生成员；`LoadInto` 也按目标实例的运行时类型读取。嵌套成员与集合元素按声明类型写出/读取，需要保留其派生字段时请把派生类型作为根对象或扁平化。读取使用 `Load<T>` / `FromObject<T>` 指定的 `T`，需要读派生成员时请指定派生类型。
+- 模型存在循环引用、成员类型不支持（如 `object`）、嵌套超过 256 层时抛出明确异常。
+- 自动注释：默认读取成员的 `[Description]` 或 XML 文档 `<summary>` 写成条目注释，类自身的说明写入 `Root.Comment`；XML summary 需要模型程序集生成并部署同名 `.xml` 文件。可用 `includeModelComments: false` 关闭。
+- `ConfigFile.Save` 生成全新的根对象，不继承旧文件注释；需要保留旧注释时用 `ConfigDocument.Load` 修改保存，或对 `ToObject` 的结果再 `SetComment`。
+
+> 自动映射基于反射：`ConfigFile` 已标注 `RequiresUnreferencedCode` / `RequiresDynamicCode`。
+> NativeAOT / 裁剪项目请使用下面的零反射手写映射，调用 `ConfigFile` 会得到 IL2026 / IL3050 提示。
+
+```csharp
+// 零反射手写映射（AOT 安全）：底层 API 保持不变
 internal sealed class AppSettings
 {
     public string ComPort = "COM1";
@@ -140,6 +186,10 @@ internal sealed class AppSettings
         BaudRate = root.GetInt32("serial.baudRate", 9600),
     };
 }
+
+// 与文件读写组合，同样只需两行：
+// settings.SaveTo(document.Root); document.Save(path);
+// AppSettings loaded = AppSettings.LoadFrom(ConfigDocument.Load(path).Root);
 ```
 
 ## 4. .cif 格式规范
@@ -155,18 +205,101 @@ internal sealed class AppSettings
 ### 4.2 注释
 
 ```cif
-# 整行注释
-// 另一种整行注释
-port = COM3      # 行尾注释
-baudRate = 9600  // 行尾注释
+# 文件级说明（与后面的条目之间留一个空行）
+
+# 串口参数
+serial {
+    # 波特率
+    baudRate = 115200   # 单位 bps
+}
 ```
 
 规则：
 
-- `#` 与 `//` 在**行首**或**前面是空白**时才被当作注释。
-- 因此 `http://host/path#frag` 这类裸值不会被截断。
+- `#` 与 `//` 在**行首**或**前面是空白**时才被当作注释；`http://host/path#frag` 这类裸值不会被截断。
 - 引号字符串中的 `#`、`//` 一律是普通字符。
-- 注释不会保存回文件：`Load → Save` 只保证语义一致，不保留原注释与排版。
+- 注释参与文本往返：`Load → Save` 会保留条目上方注释与行尾注释（统一用 `#` 写出）。
+  - 文件开头、与第一个条目之间隔有空行的注释块 → 根对象 `ConfigObject.Comment`；
+  - 其余注释块归属紧随其后的条目；紧贴 `}` 的块归 `ConfigObject.TrailingComment`。
+- 使用方式：
+
+```csharp
+var document = new ConfigDocument();
+document.Root.Comment = "应用配置";
+ConfigObject serial = document.Root.GetObject("serial");
+serial.Set("port", "COM3");
+document.Root.SetComment("serial", "串口参数");        // 条目上方
+serial.SetComment("port", "串口名");
+serial.SetInlineComment("port", "如 COM3");            // 行尾
+serial.TrailingComment = "串口参数结束";
+document.Save("app.cif");
+
+// 读取注释
+ConfigDocument loaded = ConfigDocument.Load("app.cif");
+string? file = loaded.Root.Comment;
+string? group = loaded.Root.GetComment("serial");
+string? port = loaded.Root.GetObject("serial").GetComment("port");
+string? inline = loaded.Root.GetObject("serial").GetInlineComment("port");
+```
+
+- `SetComment` / `SetInlineComment` 按字面键定位，键必须已存在；嵌套对象请先 `GetObject`。
+- 库生成的**标准文件头**会被解析器识别并跳过，反复 `Load → Save` 不会叠加。
+- 不保留的部分：注释符号（`//` → `#`）、注释缩进与空行、数组元素内部的注释。
+
+#### 从类说明自动生成注释
+
+`ConfigFile.ToObject` / `Save` / `ToText` 默认（`includeModelComments: true`）把模型说明写成注释：
+
+```csharp
+using System.ComponentModel;
+
+/// <summary>应用配置类说明</summary>
+public sealed class AppSettings
+{
+    [Description("串口名称，如 COM3")]
+    public string Port = "COM1";
+
+    /// <summary>波特率</summary>
+    public int BaudRate = 9600;
+
+    public SerialSettings Serial = new();
+}
+
+/// <summary>嵌套串口参数</summary>
+public sealed class SerialSettings
+{
+    /// <summary>数据位</summary>
+    public int DataBits = 8;
+}
+
+ConfigFile.Save("app.cif", settings);                               // 自动写注释
+ConfigFile.Save("app.cif", settings, includeModelComments: false);  // 关闭
+```
+
+生成效果：
+
+```cif
+# 应用配置类说明（来自类型自身的 <summary> 或 [Description]）
+
+# 串口名称，如 COM3
+port = "COM1"
+# 波特率
+baudRate = 9600
+# 嵌套串口参数（成员无说明时回退到 SerialSettings 类型说明）
+serial {
+    # 数据位
+    dataBits = 8
+}
+```
+
+规则：
+
+- 优先级：成员 `[Description]` > 成员 XML `<summary>` > 成员类型（嵌套类 / 枚举 / 集合元素类型）的 `[Description]` / `<summary>`。
+- 类型自身的说明写入 `Root.Comment`（文件头）。
+- 嵌套类成员没有自己的说明时，使用该类的类型说明；枚举成员同理。
+- XML `<summary>` 需要模型程序集设置 `<GenerateDocumentationFile>true</GenerateDocumentationFile>`，并把生成的 `.xml` 与程序集放在同一目录（单文件发布时回退到应用目录）；文件缺失时静默跳过。
+- 自动注释只填空位；之后 `SetComment` / `SetInlineComment` 可覆盖。
+- 数组/`List<T>` 内部的元素对象不支持逐条注释。
 
 ### 4.3 键值
 
@@ -429,6 +562,8 @@ send {
 | `void Save(string path, bool atomic = true, bool includeHeader = true)` | 保存为 UTF-8 无 BOM |
 | `bool TrySave(string path, out string? error, bool atomic = true, bool includeHeader = true)` | 不抛异常的保存 |
 
+`Load` / `Parse` 会读取注释：根对象用 `Root.Comment`，条目用 `GetComment` / `GetInlineComment`；保存时自动写出，详见 [4.2](#42-注释)。
+
 `Save` 行为：
 
 1. 自动创建目标目录。
@@ -451,6 +586,11 @@ send {
 | `void Set(string key, ConfigValue value)` | 存在则覆盖（保留位置），不存在则追加 |
 | `void Add(string key, ConfigValue value)` | 键已存在时抛 `ArgumentException` |
 | `bool ContainsKey(string key)` | 字面键是否存在 |
+| `string? Comment` / `string? TrailingComment` | 容器头部 / 末尾注释（多行用 `\n` 分隔） |
+| `string? GetComment(string key)` | 读取条目上方注释；不存在或没有注释返回 `null` |
+| `void SetComment(string key, string? comment)` | 设置条目上方注释；键必须已存在 |
+| `string? GetInlineComment(string key)` | 读取条目行尾注释 |
+| `void SetInlineComment(string key, string? comment)` | 设置条目行尾注释；多行会合并为一行 |
 | `bool Remove(string key)` | 删除并返回是否成功 |
 | `void Clear()` | 清空 |
 | `string GetString(string key, string defaultValue = "")` | 宽松读取；缺失/null/不可转换返回默认值 |
@@ -558,6 +698,36 @@ public enum ConfigValueKind : byte
 | `Message` | 中文原因 + `（第 X 行，第 Y 列）` |
 
 > 当前版本的错误消息为中文；`Line` / `Column` 与消息文本无关于语言，可在 UI 中自行本地化展示。
+
+### 5.7 ConfigFile（自动映射）
+
+建立在文档 API 之上的反射便捷层，已标注 `RequiresUnreferencedCode` / `RequiresDynamicCode`。
+
+| 成员 | 说明 |
+| --- | --- |
+| `ConfigObject ToObject<T>(T value, bool includeModelComments = true)` | 类 → 配置根对象 |
+| `string ToText<T>(T value, bool includeHeader = true, bool includeModelComments = true)` | 类 → 文本 |
+| `void Save<T>(string path, T value, bool atomic = true, bool includeHeader = true, bool includeModelComments = true)` | 类 → 文件 |
+| `bool TrySave<T>(string path, T value, out string? error, bool atomic = true, bool includeHeader = true, bool includeModelComments = true)` | 不抛异常的保存 |
+| `T Load<T>(string path) where T : new()` | 文件 → 类 |
+| `bool TryLoad<T>(string path, out T? value, out string? error)` | 不抛异常的加载 |
+| `T LoadOrDefault<T>(string path, out string? error)` | 失败时返回 `new T()`，`error` 说明原因 |
+| `T Parse<T>(string text) where T : new()` | 文本 → 类 |
+| `T FromObject<T>(ConfigObject root) where T : new()` | 根对象 → 类 |
+| `void LoadInto<T>(ConfigObject root, T target) where T : class` | 填充已有实例 |
+
+`Load` / `Parse` / `ToObject` 抛出映射过程中的原始异常（用户 getter/setter 异常会解包）；
+`TryLoad` / `TrySave` / `LoadOrDefault` 则不抛异常，通过错误文本返回原因。
+
+### 5.8 映射标注
+
+| 特性 | 目标 | 说明 |
+| --- | --- | --- |
+| `[ConfigName("key")]` | 字段 / 属性 | 指定键名；含 `.` 时按点路径写出/读取 |
+| `[ConfigIgnore]` | 字段 / 属性 | 不参与自动映射 |
+| `[Description("...")]` | 字段 / 属性 / 类型 | 系统特性；自动注释优先读取，其次 XML `<summary>` |
+
+点路径键在同一类型内不能与另一个成员的键互为前缀（例如 `serial` 与 `serial.port`），否则写出会互相覆盖，映射阶段直接报错。
 
 ## 6. 类型转换规则
 
@@ -679,7 +849,7 @@ catch (ConfigFormatException ex)
 ## 9. 性能与内存
 
 - **单遍扫描**：`ConfigParser` 是 `ref struct`，直接在 `ReadOnlySpan<char>` 上前进，不构建 Token 列表。
-- **零反射**：不含 `System.Reflection`、`dynamic`、序列化器。
+- **核心零反射**：解析器/写出器不含 `System.Reflection`、`dynamic`、序列化器；自动映射为独立可选层。
 - **低分配读取**：`ConfigObject` / `ConfigArray` 的 `foreach` 使用 struct 枚举器。
 - **查找优化**：`ConfigObject` 在键数超过 12 个时自动建立 `Dictionary<string,int>` 索引，之后按键查找为 O(1)。
 - **写出**：`StringBuilder` 预估容量；短数组单行、长数组自动多行。
@@ -695,21 +865,25 @@ catch (ConfigFormatException ex)
 <IsTrimmable>true</IsTrimmable>
 ```
 
-- 库不使用反射、`dynamic`、`JsonSerializer`、源生成器或序列化特性。
+- 核心解析/写出（`ConfigDocument` / `ConfigObject` / `ConfigArray` / `ConfigValue`）不使用反射、`dynamic`、
+  `JsonSerializer`、源生成器或序列化特性。
 - 可直接用于 NativeAOT / IL 裁剪项目；`ConfigValue` 的转换全部为手写代码。
-- 对象映射需要手写 `SaveTo` / `LoadFrom`（见 3.4），这也是 AOT 下最稳妥的方式。
+- `ConfigFile` 自动映射是反射便捷层，已标注 `RequiresUnreferencedCode` / `RequiresDynamicCode`：
+  裁剪 / AOT 项目请手写 `SaveTo` / `LoadFrom`（见 3.4）。
 
 跨平台：
 
 - 只使用 BCL 跨平台 API（`File` / `Path` / `UTF8Encoding`），无 `P/Invoke`、注册表、Win32 或
   `System.Windows` 依赖；数字格式化/解析固定使用 `InvariantCulture`，换行固定输出 `LF`，
   文件固定 UTF-8 无 BOM，因此同一份配置文本在各系统上语义一致。
-- 已验证：`win-x64` + `TrimMode=full` 裁剪发布 0 警告，裁剪产物运行内置自测 61/61 通过；
-  `linux-x64` 交叉发布生成有效 ELF 可执行文件。
+- 已验证：`dotnet build ConfigInfo.sln` 0 警告 0 错误，示例自测 **76/76** 通过。
 
 NativeAOT 发布的前置条件是目标平台的 C++ 工具链（Windows 为 MSVC 链接器）。若 `PublishAot=true`
 在最后的原生链接步骤报 `Platform linker not found`，请安装 Visual Studio 的
 “使用 C++ 的桌面开发”工作负载后重试；AOT/裁剪分析器本身已是 0 警告。
+
+> 示例工程为演示自动映射关闭了 IL2026 / IL3050 提示；库本身仍启用 `IsAotCompatible`，
+> 且核心 API 保持零反射。
 
 体验 NativeAOT 发布：
 
@@ -730,7 +904,7 @@ dotnet publish samples/ConfigInfo.Demo -c Release -r win-x64 -p:PublishAot=true
 | 限制 | 说明 / 规避 |
 | --- | --- |
 | 无 schema/校验 | 库只负责读写；业务校验请在映射层完成 |
-| 不保留注释与排版 | `Load → Save` 是语义往返，不是文本往返 |
+| 不保留数组内注释与排版 | 条目注释会保留；数组元素内部的注释、空行与缩进不保留 |
 | `[section]` 只限顶层 | 块内请用 `key { ... }` |
 | 不支持 `:` 分隔 | 统一使用 `=` |
 | 字符串不能跨行 | 使用 `\n` 转义 |
@@ -740,6 +914,12 @@ dotnet publish samples/ConfigInfo.Demo -c Release -r win-x64 -p:PublishAot=true
 | 键名区分大小写 | 需要忽略大小写请在业务层处理 |
 | 嵌套上限 256 层 | 解析/写出均有限制；`ToString` 调试输出在 32 层截断 |
 | `decimal` 精度 | 内部按 `double` 存储，最多约 15~17 位有效数字 |
+| 自动映射成员范围 | 仅公共实例字段与公共可读写属性；只读字段、只读属性、索引器、字典、多维数组不参与 |
+| 自动映射构造 | 模型及嵌套元素类型需要公共无参构造函数；默认值请在字段/属性初始化器中提供 |
+| 自动映射类型范围 | 不支持 `DateTime` / `TimeSpan` / `Guid` 等特殊类型；请改用字符串或手写映射 |
+| AOT 下的自动映射 | `ConfigFile` 使用反射；裁剪 / NativeAOT 请手写 `SaveTo` / `LoadFrom` |
+| 自动映射读取类型 | `Load<T>` / `FromObject<T>` 按指定的 `T` 读取，派生成员需指定派生类型 |
+| `[ConfigName]` 路径 | 同一类型内不能与其他成员键互为前缀（如 `serial` 与 `serial.port`） |
 | `ulong` 高位 | 按补码位模式存储，用 `AsUInt64()` 读取 |
 | 十进制整数溢出 | 超出 `long` 的字面量保留为字符串，不会转成浮点 |
 | UTF-16 无 BOM | 不支持自动识别，请保存为 UTF-8 或带 BOM |
@@ -752,13 +932,13 @@ dotnet publish samples/ConfigInfo.Demo -c Release -r win-x64 -p:PublishAot=true
 # 构建
 dotnet build ConfigInfo.sln -c Debug
 
-# 单元测试（65 个用例）
+# 单元测试（112 个用例）
 dotnet test tests/ConfigInfo.Tests/ConfigInfo.Tests.csproj
 
 # 运行示例（生成示例配置、演示读取/修改/容错/性能）
 dotnet run --project samples/ConfigInfo.Demo
 
-# 运行内置自测（61 项断言，返回码 0 表示全部通过）
+# 运行内置自测（76 项断言，返回码 0 表示全部通过）
 dotnet run --project samples/ConfigInfo.Demo -- --selftest
 ```
 
@@ -768,12 +948,16 @@ dotnet run --project samples/ConfigInfo.Demo -- --selftest
 ConfigInfo.sln
 ├── src/ConfigInfo/                 # 库
 │   ├── ConfigDocument.cs           # 文档、解析、文件读写
-│   ├── ConfigObject.cs             # 有序键值对象、路径访问
+│   ├── ConfigFile.cs               # 类 ⇄ 文件自动映射（反射便捷层）
+│   ├── ConfigAttributes.cs         # ConfigName / ConfigIgnore 标注
+│   ├── ConfigObject.cs             # 有序键值对象、路径访问、条目注释
 │   ├── ConfigArray.cs              # 有序数组
 │   ├── ConfigValue.cs              # 值结构体、转换、文本解析辅助
 │   ├── ConfigValueKind.cs          # 值种类枚举
 │   ├── ConfigFormatException.cs    # 语法错误（行/列）
 │   └── Internal/
+│       ├── ConfigHeader.cs         # 标准文件头（解析时识别并跳过）
+│       ├── ModelCommentReader.cs   # [Description] / XML summary 读取（自动注释）
 │       ├── ConfigParser.cs         # 单遍解析器
 │       └── ConfigWriter.cs         # 文本写出器
 ├── tests/ConfigInfo.Tests/         # xUnit 测试
@@ -783,6 +967,17 @@ ConfigInfo.sln
 > 本机若只安装了 .NET 9/10 运行时，可先设置 `$env:DOTNET_ROLL_FORWARD = 'LatestMajor'` 再运行测试或示例。
 
 ## 14. 审计与修复记录
+
+版本 1.2.0 新增（纯增量，不改变 `.cif` 格式）：
+
+| 变化 | 说明 |
+| --- | --- |
+| 自动映射 | `ConfigFile.Save` / `Load<T>` / `TryLoad` / `LoadOrDefault` / `Parse` / `FromObject` / `LoadInto` |
+| 注释读写 | 条目上方注释 / 行尾注释、根对象头尾注释；`Load → Save` 保留，标准头自动去重 |
+| 自动注释 | `[Description]` / XML `<summary>` 自动加在条目上方；类型说明写入文件头 |
+| 映射标注 | `[ConfigName]`（含点路径）、`[ConfigIgnore]` |
+| 映射规则 | 嵌套类、数组 / `List<T>`、枚举、可空值类型、大小写容错、缺失键保留默认值 |
+| 安全边界 | 循环引用检测、256 层嵌套上限、路径键冲突检测、可空元素/可空结构体根、根级派生字段不丢失、用户 getter/setter 异常解包 |
 
 本次完整审计（版本 1.1.0）修复的问题：
 
@@ -808,13 +1003,13 @@ ConfigInfo.sln
 | 18 | 错误提示不够明确 | `a: 1`、块内 `[section]` 报错含糊 | 增加针对性错误消息 |
 | 19 | 表头内的引号被当作普通字符切分 | `["a.b"]` 生成 `"a` / `b"` 等怪异键名且不报错 | 表头检测引号并给出明确错误 |
 
-回归测试：`tests/ConfigInfo.Tests` 共 **65** 个用例；示例内置自测 **61** 项断言；构建 0 警告 0 错误。
+回归测试：`tests/ConfigInfo.Tests` 共 **112** 个用例；示例内置自测 **76** 项断言；构建 0 警告 0 错误。
 
 ## 15. 版本与兼容性
 
 | 项目 | 值 |
 | --- | --- |
-| 库版本 | 1.1.0（完整审计后） |
+| 库版本 | 1.2.0（新增自动映射，向后兼容） |
 | 目标框架 | `net8.0` |
 | 支持平台 | Windows / Linux / macOS（任何 .NET 8 支持的平台；无平台专用 API） |
 | 语言版本 | `latest`（使用文件作用域命名空间、集合表达式等） |
@@ -823,6 +1018,11 @@ ConfigInfo.sln
 | 可空引用类型 | 已启用 |
 
 格式兼容性说明：
+
+- 1.2.0 为纯增量：新增 `ConfigFile`、两个标注特性与注释读写，底层 API 与 `.cif` 语法未变。
+- 自动映射的默认键名为成员名首字母小写；升级旧配置时可使用 `[ConfigName("...")]` 保持原键名。
+- 注释现在参与 `Load → Save` 往返；此前版本会丢弃注释。
+- 自动注释为 1.2.0 新增能力，可用 `includeModelComments: false` 关闭，不影响 `.cif` 格式。
 
 - 本次修复中，`1_` 与超 64 位十六进制字面量从“被当作数字”改为“保留为字符串”，属于**纠错**而非语法扩展。
 - 含 `.` 的裸键语义未变（仍会展开为嵌套对象）；只是写出器现在会给这类字面键加引号，确保往返正确。
@@ -866,8 +1066,8 @@ Design goals:
    silently produce missing values.
 3. **Stable** — insertion order is preserved, and `ToText → Parse → ToText` is idempotent;
    syntax errors report exact line and column numbers.
-4. **AOT-safe** — no reflection, no dynamic code, no serializer attributes; zero warnings
-   under NativeAOT and IL trimming.
+4. **AOT-safe core** — parsing and writing use no reflection, no dynamic code, and no serializer
+   attributes; the optional object mapper is reflection-based and explicitly annotated.
 5. **Bounded** — nesting depth is capped, so malformed input cannot crash the process with
    a `StackOverflowException`.
 
@@ -879,14 +1079,16 @@ The library targets `net8.0`, ships as a single assembly, and has no third-party
 | --- | --- |
 | Data model | `null`, boolean, 64-bit integer, double, string, array, ordered object |
 | Syntax | `key = value`, `[section.path]`, `key { ... }`, `[1, 2, 3]`, `{ a = 1 }` |
-| Comments | `#` and `//`, whole-line or end-of-line |
+| Comments | `#` and `//`, whole-line or end-of-line; read/write with `Load → Save` preservation |
 | Strings | Double-quoted with escapes; single-quoted literal (great for Windows paths) |
 | Numbers | Decimal, `0x` / `0b` / `0o`, `_` separators, `NaN` / `±Infinity` |
 | Reading | Literal keys, dotted paths, strict `As*`, lenient `Get*` with defaults |
+| Object mapping | `ConfigFile.Save(path, obj)` / `ConfigFile.Load<T>(path)`; tune with `[ConfigName]` / `[ConfigIgnore]` |
+| Auto comments | `[Description]` / XML `<summary>` written as entry comments; disable with `includeModelComments` |
 | Writing | Insertion order preserved; short arrays inline, long arrays multi-line |
 | Files | UTF-8 without BOM on save; UTF-8 / UTF-16 BOM detection on load; atomic replace |
 | Diagnostics | `ConfigFormatException` with 1-based `Line` / `Column` |
-| AOT | No reflection, no `dynamic`, no source generators; `IsAotCompatible` |
+| AOT | Zero-reflection core; the `ConfigFile` mapper is a reflection convenience layer (RUC/RDC; hand-write mapping for AOT) |
 
 ## 3. Quick Start
 
@@ -935,13 +1137,77 @@ root.SetPath("network.tcp.remotePort", 9000);        // creates intermediate obj
 document.Save("config/app.cif");                     // atomic by default
 ```
 
-### 3.4 Strongly typed mapping without reflection
+### 3.4 Strongly typed mapping: hand the class to the library
 
-Object mapping is intentionally manual (`SaveTo` / `LoadFrom`), which keeps the library
-NativeAOT-safe and gives you full control over defaults and version migration.
-See [`samples/ConfigInfo.Demo/AppSettings.cs`](samples/ConfigInfo.Demo/AppSettings.cs).
+No base class, interface, source generator, or configuration is required. Hand a plain class to
+`ConfigFile` to save it, and generate the class directly when reading a file.
 
 ```csharp
+internal sealed class AppSettings
+{
+    public string ComPort = "COM1";                         // → comPort
+    public int BaudRate = 9600;                             // → baudRate
+    public byte[] FrameHead = [0xAA, 0x55];                 // → frameHead = [170, 85]
+    public SerialSettings Serial = new();                   // → serial { ... }
+
+    [ConfigName("network.remoteIp")] public string RemoteIp = "127.0.0.1";
+    [ConfigIgnore] public bool IsConnected;                 // neither written nor read
+}
+
+internal sealed class SerialSettings
+{
+    public int DataBits = 8;                                // → serial.dataBits
+    public string Parity = "None";                          // → serial.parity
+}
+
+var settings = new AppSettings { ComPort = "COM7" };
+ConfigFile.Save("config/app.cif", settings);                // object → file (atomic by default)
+
+AppSettings loaded = ConfigFile.Load<AppSettings>("config/app.cif");   // file → object
+
+// Never throws for a missing or broken file; returns an instance with field defaults:
+AppSettings safe = ConfigFile.LoadOrDefault("config/app.cif", out string? error);
+```
+
+Mapping rules:
+
+- Public instance fields and public read/write properties are mapped; the default key is the
+  member name with a lowercase first letter (`ComPort` → `comPort`).
+- Nested classes become child objects; `T[]` / `List<T>` become arrays whose elements may be
+  scalars or nested objects.
+- Supported: `string`, `bool`, all integer types, `float`, `double`, `decimal`, enums (written by
+  name), nullable value types, arrays, `List<T>`, and nested classes.
+- Missing keys keep the `new T()` default; keys match exactly first, then case-insensitively;
+  unknown keys are ignored.
+- Lenient conversion applies: `"115200"` and `0x1F90` both read as integers; narrowing clamps to
+  the target range.
+- `[ConfigName("serial.port")]` renames a member or writes a flat class as groups via a dotted
+  path; `[ConfigIgnore]` excludes a member.
+- Dotted paths must be valid (no leading/trailing `.` or `..`) and must not be a prefix of another
+  member key in the same type (for example `serial` plus `serial.port` is rejected to prevent
+  write-time overwrites).
+- The root object is written using its **runtime type**: calling `ToObject`/`Save` through a
+  base-class or interface variable does not lose root-level derived members; `LoadInto` also reads
+  by the target's runtime type. Nested members and collection elements are written/read by their
+  declared types; use the derived type at the root or flatten them if their extra fields matter.
+  Reading uses the `T` supplied to `Load<T>` / `FromObject<T>`; specify the derived type to read
+  derived members.
+- Circular references, unsupported member types (for example `object`), and nesting beyond 256
+  levels raise explicit exceptions.
+- Auto comments: by default member `[Description]` / XML `<summary>` is written as entry comments,
+  and the type's own description becomes the file-level `Root.Comment`; disable with
+  `includeModelComments: false`. XML summaries require the model assembly to generate and deploy
+  its `.xml` documentation file.
+- `ConfigFile.Save` builds a fresh root object and does not inherit comments from the old file.
+  To keep old file comments, modify and save through `ConfigDocument.Load`, or call `SetComment`
+  on the `ToObject` result before saving.
+
+> The mapper is reflection-based: `ConfigFile` is annotated with `RequiresUnreferencedCode` and
+> `RequiresDynamicCode`. For NativeAOT / trimming, use the zero-reflection manual mapping below;
+> calling `ConfigFile` produces IL2026 / IL3050 diagnostics.
+
+```csharp
+// Zero-reflection manual mapping (AOT-safe): the low-level API is unchanged
 internal sealed class AppSettings
 {
     public string ComPort = "COM1";
@@ -975,16 +1241,93 @@ internal sealed class AppSettings
 ### 4.2 Comments
 
 ```cif
-# whole-line comment
-// another whole-line comment
-port = COM3      # trailing comment
-baudRate = 9600  // trailing comment
+# file-level note (leave one blank line before the first entry)
+
+# serial settings
+serial {
+    # baud rate
+    baudRate = 115200   # unit: bps
+}
 ```
 
 - `#` and `//` start a comment only at the beginning of a line or after whitespace.
   Thus a bare value such as `http://host/path#frag` is preserved.
 - Inside quoted strings, `#` and `//` are ordinary characters.
-- Comments are not preserved: `Load → Save` is a semantic round-trip, not a textual one.
+- Comments participate in text round-trips: `Load → Save` preserves leading and inline comments
+  (always written with `#`).
+  - A block at the beginning of the file, separated from the first entry by a blank line,
+    becomes `ConfigObject.Comment` on the root object.
+  - Other blocks belong to the entry that follows; a block immediately before `}` becomes
+    `ConfigObject.TrailingComment`.
+- Usage:
+
+```csharp
+var document = new ConfigDocument();
+document.Root.Comment = "application settings";
+ConfigObject serial = document.Root.GetObject("serial");
+serial.Set("port", "COM3");
+document.Root.SetComment("serial", "serial settings");   // above the entry
+serial.SetComment("port", "port name");
+serial.SetInlineComment("port", "for example COM3");     // end of line
+serial.TrailingComment = "end of serial settings";
+document.Save("app.cif");
+
+// Read comments back
+ConfigDocument loaded = ConfigDocument.Load("app.cif");
+string? file = loaded.Root.Comment;
+string? group = loaded.Root.GetComment("serial");
+string? port = loaded.Root.GetObject("serial").GetComment("port");
+string? inline = loaded.Root.GetObject("serial").GetInlineComment("port");
+```
+
+- `SetComment` / `SetInlineComment` use literal keys and require the key to exist; use
+  `GetObject` first for nested objects.
+- The generated **standard header** is recognized and skipped by the parser, so repeated
+  `Load → Save` does not duplicate it.
+- Not preserved: the comment marker (`//` becomes `#`), comment indentation/blank lines, and
+  comments inside array elements.
+
+#### Generating comments from model docs
+
+`ConfigFile.ToObject` / `Save` / `ToText` write model documentation as comments by default
+(`includeModelComments: true`):
+
+```csharp
+using System.ComponentModel;
+
+/// <summary>application settings</summary>
+public sealed class AppSettings
+{
+    [Description("serial port name, for example COM3")]
+    public string Port = "COM1";
+
+    /// <summary>baud rate</summary>
+    public int BaudRate = 9600;
+
+    public SerialSettings Serial = new();
+}
+
+/// <summary>nested serial settings</summary>
+public sealed class SerialSettings
+{
+    /// <summary>data bits</summary>
+    public int DataBits = 8;
+}
+
+ConfigFile.Save("app.cif", settings);                               // comments included
+ConfigFile.Save("app.cif", settings, includeModelComments: false);  // disabled
+```
+
+Rules:
+
+- Priority: member `[Description]` > member XML `<summary>` > member type (nested class / enum /
+  collection element type) `[Description]` / `<summary>`.
+- The type's own description becomes `Root.Comment` (file header).
+- XML `<summary>` requires `<GenerateDocumentationFile>true</GenerateDocumentationFile>` and the
+  generated `.xml` next to the assembly (single-file falls back to the app directory); a missing
+  file is ignored.
+- Auto comments only fill gaps; later `SetComment` / `SetInlineComment` calls override them.
+- Per-element comments inside arrays / `List<T>` are not supported.
 
 ### 4.3 Keys and values
 
@@ -1268,6 +1611,11 @@ Ordered key/value object; insertion order is preserved and keys are case-sensiti
 | `void Set(string key, ConfigValue value)` | Overwrites in place, or appends |
 | `void Add(string key, ConfigValue value)` | Throws `ArgumentException` if the key exists |
 | `bool ContainsKey(string key)` | Literal key lookup |
+| `string? Comment` / `string? TrailingComment` | Container leading / trailing comment (multi-line uses `\n`) |
+| `string? GetComment(string key)` | Leading comment of an entry; `null` if missing |
+| `void SetComment(string key, string? comment)` | Sets the leading comment; the key must exist |
+| `string? GetInlineComment(string key)` | Inline comment of an entry |
+| `void SetInlineComment(string key, string? comment)` | Sets the inline comment; multi-line text is collapsed |
 | `bool Remove(string key)` | Removes and returns success |
 | `void Clear()` | Removes all entries |
 | `string GetString(string key, string defaultValue = "")` | Lenient; missing/null/unconvertible → default |
@@ -1365,6 +1713,38 @@ The order is part of the `IsScalar` rule (`<= String`); do not rely on it extern
 > Error messages are currently in Chinese. `Line` and `Column` are language-neutral and can be
 > localized in your UI.
 
+### 5.7 ConfigFile (auto mapping)
+
+A reflection convenience layer on top of the document API, annotated with
+`RequiresUnreferencedCode` / `RequiresDynamicCode`.
+
+| Member | Description |
+| --- | --- |
+| `ConfigObject ToObject<T>(T value, bool includeModelComments = true)` | Object → root object |
+| `string ToText<T>(T value, bool includeHeader = true, bool includeModelComments = true)` | Object → text |
+| `void Save<T>(string path, T value, bool atomic = true, bool includeHeader = true, bool includeModelComments = true)` | Object → file |
+| `bool TrySave<T>(string path, T value, out string? error, bool atomic = true, bool includeHeader = true, bool includeModelComments = true)` | Non-throwing save |
+| `T Load<T>(string path) where T : new()` | File → object |
+| `bool TryLoad<T>(string path, out T? value, out string? error)` | Non-throwing load |
+| `T LoadOrDefault<T>(string path, out string? error)` | Returns `new T()` on failure; `error` explains why |
+| `T Parse<T>(string text) where T : new()` | Text → object |
+| `T FromObject<T>(ConfigObject root) where T : new()` | Root object → object |
+| `void LoadInto<T>(ConfigObject root, T target) where T : class` | Populate an existing instance |
+
+`Load` / `Parse` / `ToObject` throw the original mapping exception (user getter/setter exceptions
+are unwrapped); `TryLoad` / `TrySave` / `LoadOrDefault` never throw and return the reason as text.
+
+### 5.8 Mapping attributes
+
+| Attribute | Target | Description |
+| --- | --- | --- |
+| `[ConfigName("key")]` | Field / property | Overrides the key; a dotted name is written/read as a path |
+| `[ConfigIgnore]` | Field / property | Excluded from auto mapping |
+| `[Description("...")]` | Field / property / type | BCL attribute; auto comments prefer it over XML `<summary>` |
+
+Within one type, dotted keys must not be a prefix of another member key (for example `serial`
+and `serial.port`), otherwise writes overwrite each other; validation fails early.
+
 ## 6. Conversion Rules
 
 ### 6.1 Conversion matrix
@@ -1430,6 +1810,9 @@ doc.Save("config/app.cif", includeHeader: false); // no header comment
 doc.Save("config/app.cif", atomic: false);        // direct overwrite
 ```
 
+`Load` / `Parse` read comments too: `Root.Comment` for the file-level block and
+`GetComment` / `GetInlineComment` for entries; saving writes them back (see [4.2](#42-comments)).
+
 Guarantees and boundaries of atomic save:
 
 - The target is replaced as a whole within the same directory; readers see either the old or
@@ -1480,7 +1863,7 @@ Common errors:
 ## 9. Performance and Memory
 
 - **Single pass**: `ConfigParser` is a `ref struct` scanning a `ReadOnlySpan<char>`; no token list.
-- **No reflection**: no `System.Reflection`, `dynamic`, or serializer.
+- **Zero-reflection core**: the parser/writer use no `System.Reflection`, `dynamic`, or serializer.
 - **Low-allocation reads**: struct enumerators for `ConfigObject` and `ConfigArray`.
 - **Lookup index**: `ConfigObject` builds a `Dictionary<string,int>` once it holds more than 12
   entries; key lookup becomes O(1).
@@ -1497,9 +1880,12 @@ Both `Parse` and `ToText` are O(n).
 <IsTrimmable>true</IsTrimmable>
 ```
 
-- No reflection, `dynamic`, `JsonSerializer`, source generators, or serialization attributes.
+- The zero-reflection core (`ConfigDocument` / `ConfigObject` / `ConfigArray` / `ConfigValue`) uses no
+  reflection, `dynamic`, `JsonSerializer`, source generators, or serialization attributes.
 - Safe for NativeAOT and IL trimming; all conversions are hand-written.
-- Object mapping is manual (`SaveTo` / `LoadFrom`), which is the safest pattern under AOT.
+- The `ConfigFile` mapper is a reflection convenience layer annotated with
+  `RequiresUnreferencedCode` / `RequiresDynamicCode`; hand-write `SaveTo` / `LoadFrom` for AOT
+  (see 3.4).
 
 Cross-platform:
 
@@ -1507,13 +1893,16 @@ Cross-platform:
   registry, Win32, or `System.Windows` dependency. Numbers always use `InvariantCulture`,
   output always uses `LF`, and files are always UTF-8 without BOM, so the same configuration
   text has identical semantics on every OS.
-- Verified: `win-x64` + `TrimMode=full` produces a trimmed app with 0 warnings whose
-  self-test passes 61/61; `linux-x64` cross-publish produces a valid ELF executable.
+- Verified: `dotnet build ConfigInfo.sln` finishes with 0 warnings and 0 errors, and the sample
+  self-test passes **76/76**.
 
 NativeAOT requires the C++ toolchain of the target platform (the MSVC linker on Windows).
 If `PublishAot=true` stops at the native link step with `Platform linker not found`, install
 the “Desktop development with C++” workload in Visual Studio and retry; the AOT/trim
 analyzers themselves already report 0 warnings.
+
+> The sample project suppresses IL2026 / IL3050 to demonstrate the auto mapper. The library
+> still enables `IsAotCompatible`, and its core APIs remain reflection-free.
 
 Try a NativeAOT publish:
 
@@ -1534,7 +1923,7 @@ dotnet publish samples/ConfigInfo.Demo -c Release -r win-x64 -p:PublishAot=true
 | Limitation | Notes / Workaround |
 | --- | --- |
 | No schema/validation | Validate in your mapping layer |
-| Comments and layout are not preserved | `Load → Save` is semantic, not textual |
+| Comments inside arrays and layout are not preserved | Entry comments are preserved; comments inside array elements, blank lines, and indentation are not |
 | `[section]` is top-level only | Use `key { ... }` inside blocks |
 | No `:` separator | Always use `=` |
 | Quoted strings cannot span lines | Use `\n` escapes |
@@ -1544,6 +1933,12 @@ dotnet publish samples/ConfigInfo.Demo -c Release -r win-x64 -p:PublishAot=true
 | Case-sensitive keys | Normalize in the business layer if needed |
 | Nesting cap of 256 levels | Applies to parsing and writing; `ToString` truncates at 32 |
 | `decimal` precision | Stored as `double` (~15–17 significant digits) |
+| Auto-mapping member scope | Public instance fields and public read/write properties only; read-only fields, read-only properties, indexers, dictionaries, and multi-dimensional arrays are skipped |
+| Auto-mapping constructors | Models and nested element types need a public parameterless constructor; provide defaults in field/property initializers |
+| Auto-mapping type scope | No `DateTime` / `TimeSpan` / `Guid`; use strings or hand-written mapping |
+| Auto-mapping under AOT | `ConfigFile` uses reflection; hand-write `SaveTo` / `LoadFrom` for NativeAOT / trimming |
+| Auto-mapping read type | `Load<T>` / `FromObject<T>` read by the supplied `T`; specify the derived type to read derived members |
+| `[ConfigName]` paths | Dotted keys must not be a prefix of another member key in the same type (`serial` plus `serial.port`) |
 | `ulong` high bit | Stored as a two's-complement pattern; read with `AsUInt64()` |
 | Decimal integer overflow | Out-of-range literals stay strings rather than becoming floats |
 | UTF-16 without BOM | Not auto-detected; save as UTF-8 or with a BOM |
@@ -1559,13 +1954,24 @@ dotnet run --project samples/ConfigInfo.Demo
 dotnet run --project samples/ConfigInfo.Demo -- --selftest
 ```
 
-The test suite contains **65** xUnit cases; the sample self-test runs **61** assertions and
+The test suite contains **112** xUnit cases; the sample self-test runs **76** assertions and
 returns exit code `0` when everything passes.
 
 If only a .NET 9/10 runtime is installed, set `$env:DOTNET_ROLL_FORWARD = 'LatestMajor'`
 before running the tests or the sample.
 
 ## 14. Audit and Fix Log
+
+Added in version 1.2.0 (purely additive; the `.cif` format is unchanged):
+
+| Change | Details |
+| --- | --- |
+| Auto mapping | `ConfigFile.Save` / `Load<T>` / `TryLoad` / `LoadOrDefault` / `Parse` / `FromObject` / `LoadInto` |
+| Comments | Entry leading / inline comments and container leading / trailing comments; preserved by `Load → Save`, standard header de-duplicated |
+| Auto comments | `[Description]` / XML `<summary>` written above entries; type description becomes the file header |
+| Mapping attributes | `[ConfigName]` (including dotted paths), `[ConfigIgnore]` |
+| Mapping rules | Nested classes, arrays / `List<T>`, enums, nullable value types, case-insensitive fallback, defaults for missing keys |
+| Safety bounds | Circular-reference detection, 256-level nesting cap, path-key conflict detection, nullable elements/nullable struct roots, no root-level derived-member loss, unwrapped user getter/setter exceptions |
 
 Fixes delivered by the full audit (version 1.1.0):
 
@@ -1591,14 +1997,14 @@ Fixes delivered by the full audit (version 1.1.0):
 | 18 | Unclear error messages | `a: 1` and block-level `[section]` were confusing | Added targeted diagnostics |
 | 19 | Quotes inside a section header were split as ordinary characters | `["a.b"]` produced bizarre keys such as `"a` / `b"` without any error | Headers now detect quotes and report a clear error |
 
-Verification: **65** xUnit tests, **61** sample self-test assertions, build with 0 warnings and
+Verification: **112** xUnit tests, **76** sample self-test assertions, build with 0 warnings and
 0 errors.
 
 ## 15. Version and Compatibility
 
 | Item | Value |
 | --- | --- |
-| Library version | 1.1.0 (after the full audit) |
+| Library version | 1.2.0 (adds the auto mapper; backward compatible) |
 | Target framework | `net8.0` |
 | Supported platforms | Windows / Linux / macOS (any platform supported by .NET 8; no OS-specific APIs) |
 | Language version | `latest` (file-scoped namespaces, collection expressions, …) |
@@ -1607,6 +2013,14 @@ Verification: **65** xUnit tests, **61** sample self-test assertions, build with
 | Nullable reference types | Enabled |
 
 Format compatibility notes:
+
+- 1.2.0 is purely additive: it adds `ConfigFile`, two attributes, and comment read/write; the
+  core API and `.cif` syntax are unchanged.
+- Auto-mapping uses a lowercase-first-letter key by default; use `[ConfigName("...")]` to keep
+  existing key names when migrating.
+- Comments now participate in `Load → Save`; earlier versions dropped them.
+- Auto comments are new in 1.2.0 and can be disabled with `includeModelComments: false`;
+  the `.cif` format is unchanged.
 
 - `1_` and hexadecimal literals wider than 64 bits changed from “accepted as numbers” to
   “kept as strings”. This is a **correction**, not a syntax extension.
@@ -1621,4 +2035,4 @@ Format compatibility notes:
 ---
 
 **License / 许可证**: Not declared in this repository.  
-**Version / 版本**: 1.1.0 · **Target / 目标框架**: `net8.0`
+**Version / 版本**: 1.2.0 · **Target / 目标框架**: `net8.0`

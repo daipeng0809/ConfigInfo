@@ -5,6 +5,7 @@ namespace ConfigInfo;
 
 /// <summary>
 /// 一个 .cif 配置文档：包含根对象 <see cref="Root"/>，负责解析、生成文本与文件读写。
+/// 注释（条目上方注释、行尾注释、根对象头尾注释）会随解析读取，并在保存时写出。
 /// 全部实现不依赖反射与动态代码，NativeAOT / 裁剪下可安全使用。
 /// </summary>
 public sealed class ConfigDocument
@@ -94,7 +95,8 @@ public sealed class ConfigDocument
         }
     }
 
-    /// <summary>生成 .cif 文本。<paramref name="includeHeader"/> 为 true 时在文件头写入格式说明注释。</summary>
+    /// <summary>生成 .cif 文本。<paramref name="includeHeader"/> 为 true 时在文件头写入格式说明注释；
+    /// <see cref="ConfigObject.Comment"/> 写在标准头之后。</summary>
     public string ToText(bool includeHeader = true) => ConfigWriter.Write(Root, includeHeader);
 
     /// <summary>生成 .cif 文本（含头注释）。</summary>

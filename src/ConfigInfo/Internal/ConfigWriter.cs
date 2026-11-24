@@ -19,39 +19,46 @@ internal static class ConfigWriter
         var builder = new StringBuilder(root.Count * 32 + 128);
         if (includeHeader)
             AppendHeader(builder);
+        if (!string.IsNullOrWhiteSpace(root.Comment))
+        {
+            AppendCommentBlock(builder, root.Comment, 0);
+            builder.Append('\n'); // 空行分隔：解析时保持为文件级注释，而不是第一条的注释
+        }
+
         AppendObjectEntries(builder, root, 0);
         return builder.ToString();
     }
 
-    private static void AppendHeader(StringBuilder builder)
-    {
-        builder.Append("# ============================================================\n");
-        builder.Append("# ConfigInfo 配置文件（.cif 格式，UTF-8 文本，可直接编辑）\n");
-        builder.Append("# 键值：key = value         分组：[section.path] 或 key { ... }\n");
-        builder.Append("# 数组：[1, 2, 3]           对象：{ a = 1, b = 2 }\n");
-        builder.Append("# 数字：-1 / 3.14 / 1e9 / 0x1F / 0b1010 / 0o17 / NaN / Infinity\n");
-        builder.Append("# 注释：# 或 //             字符串：\"...\" / '...' / 裸值\n");
-        builder.Append("# ============================================================\n");
-    }
+    private static void AppendHeader(StringBuilder builder) => ConfigHeader.Append(builder);
 
     private static void AppendObjectEntries(StringBuilder builder, ConfigObject obj, int depth)
     {
         CheckNestingDepth(depth);
         foreach (var pair in obj)
         {
-            AppendIndent(builder, depth);
             ConfigValue value = pair.Value;
+
+            string? comment = obj.GetComment(pair.Key);
+            if (comment is null && value.Kind == ConfigValueKind.Object)
+                comment = value.AsObject().Comment;
+            AppendCommentBlock(builder, comment, depth);
+
+            AppendIndent(builder, depth);
             if (value.Kind == ConfigValueKind.Object)
             {
                 ConfigObject child = value.AsObject();
                 AppendKey(builder, pair.Key);
-                if (child.Count == 0)
+                if (child.Count == 0 && string.IsNullOrWhiteSpace(child.TrailingComment))
                 {
-                    builder.Append(" = {}\n");
+                    builder.Append(" = {}");
+                    AppendInlineComment(builder, obj.GetInlineComment(pair.Key));
+                    builder.Append('\n');
                     continue;
                 }
 
-                builder.Append(" {\n");
+                builder.Append(" {");
+                AppendInlineComment(builder, obj.GetInlineComment(pair.Key));
+                builder.Append('\n');
                 AppendObjectEntries(builder, child, depth + 1);
                 AppendIndent(builder, depth);
                 builder.Append("}\n");
@@ -61,8 +68,44 @@ internal static class ConfigWriter
             AppendKey(builder, pair.Key);
             builder.Append(" = ");
             AppendValue(builder, value, depth);
+            AppendInlineComment(builder, obj.GetInlineComment(pair.Key));
             builder.Append('\n');
         }
+
+        AppendCommentBlock(builder, obj.TrailingComment, depth);
+    }
+
+    /// <summary>写条目上方的注释块：多行注释拆成多条 '#' 行，空行写成单独的 '#'。</summary>
+    private static void AppendCommentBlock(StringBuilder builder, string? comment, int depth)
+    {
+        if (string.IsNullOrWhiteSpace(comment))
+            return;
+
+        string normalized = comment.Replace("\r\n", "\n").Replace('\r', '\n');
+        foreach (string rawLine in normalized.Split('\n'))
+        {
+            AppendIndent(builder, depth);
+            string line = rawLine.TrimEnd();
+            builder.Append('#');
+            if (line.Length > 0)
+                builder.Append(' ').Append(line);
+            builder.Append('\n');
+        }
+    }
+
+    /// <summary>写行尾注释；多行内容合并为一行。</summary>
+    private static void AppendInlineComment(StringBuilder builder, string? comment)
+    {
+        if (string.IsNullOrWhiteSpace(comment))
+            return;
+
+        string singleLine = comment
+            .Replace("\r\n", " ")
+            .Replace('\n', ' ')
+            .Replace('\r', ' ')
+            .Trim();
+        if (singleLine.Length > 0)
+            builder.Append("  # ").Append(singleLine);
     }
 
     private static void AppendValue(StringBuilder builder, ConfigValue value, int depth)

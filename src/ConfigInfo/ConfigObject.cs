@@ -5,7 +5,8 @@ namespace ConfigInfo;
 
 /// <summary>
 /// 有序键值对象：保持写入顺序、按序输出；键名区分大小写。
-/// 提供点路径访问（如 "serial.frame.head"）与宽松类型读取。
+/// 提供点路径访问（如 "serial.frame.head"）、宽松类型读取与条目注释。
+/// 注释参与文本往返：<c>Load → Save</c> 会保留条目注释与行尾注释。
 /// </summary>
 public sealed class ConfigObject : IEnumerable<KeyValuePair<string, ConfigValue>>
 {
@@ -19,10 +20,21 @@ public sealed class ConfigObject : IEnumerable<KeyValuePair<string, ConfigValue>
     {
         public string Key;
         public ConfigValue Value;
+        public string? Comment;
+        public string? InlineComment;
     }
 
     /// <summary>键值对数量。</summary>
     public int Count => _entries.Count;
+
+    /// <summary>
+    /// 容器自身注释（多行用 <c>\n</c> 分隔）。根对象的注释写出在文件头部（标准头之后）；
+    /// 嵌套对象建议用父对象的 <see cref="SetComment"/> 指定，二者都设置时优先使用父级条目注释。
+    /// </summary>
+    public string? Comment { get; set; }
+
+    /// <summary>容器末尾注释：嵌套对象写在最后一个条目之后、右花括号之前；根对象写在文件末尾。</summary>
+    public string? TrailingComment { get; set; }
 
     /// <summary>
     /// 按键名读写值。<paramref name="key"/> 为字面键名（不做路径拆解）。
@@ -105,6 +117,56 @@ public sealed class ConfigObject : IEnumerable<KeyValuePair<string, ConfigValue>
         ArgumentNullException.ThrowIfNull(key);
         return TryFindIndex(key, out _);
     }
+
+    // ===== 注释（按字面键名，不拆解点路径） =====
+
+    /// <summary>读取条目上方注释；键不存在或没有注释时返回 <c>null</c>。</summary>
+    public string? GetComment(string key)
+    {
+        ArgumentNullException.ThrowIfNull(key);
+        return TryFindIndex(key, out int index) ? _entries[index].Comment : null;
+    }
+
+    /// <summary>
+    /// 设置条目上方注释（多行用 <c>\n</c> 分隔，写出时每行加 <c>#</c>）。
+    /// 传 <c>null</c> 或空白可清除注释。键必须已存在（请先 <see cref="Set"/>）。
+    /// </summary>
+    /// <exception cref="KeyNotFoundException">键不存在。</exception>
+    public void SetComment(string key, string? comment)
+    {
+        ArgumentNullException.ThrowIfNull(key);
+        ref Entry entry = ref GetEntryRef(key);
+        entry.Comment = NormalizeComment(comment);
+    }
+
+    /// <summary>读取条目行尾注释；键不存在或没有注释时返回 <c>null</c>。</summary>
+    public string? GetInlineComment(string key)
+    {
+        ArgumentNullException.ThrowIfNull(key);
+        return TryFindIndex(key, out int index) ? _entries[index].InlineComment : null;
+    }
+
+    /// <summary>
+    /// 设置条目行尾注释（写出在值同一行；多行内容会合并为一行）。
+    /// 传 <c>null</c> 或空白可清除注释。键必须已存在（请先 <see cref="Set"/>）。
+    /// </summary>
+    /// <exception cref="KeyNotFoundException">键不存在。</exception>
+    public void SetInlineComment(string key, string? comment)
+    {
+        ArgumentNullException.ThrowIfNull(key);
+        ref Entry entry = ref GetEntryRef(key);
+        entry.InlineComment = NormalizeComment(comment);
+    }
+
+    private ref Entry GetEntryRef(string key)
+    {
+        if (!TryFindIndex(key, out int index))
+            throw new KeyNotFoundException($"配置中不存在键 \"{key}\"。请先 Set 值再写注释。");
+        return ref CollectionsMarshal.AsSpan(_entries)[index];
+    }
+
+    private static string? NormalizeComment(string? comment)
+        => string.IsNullOrWhiteSpace(comment) ? null : comment.Trim();
 
     /// <summary>删除指定键，返回是否删除成功。</summary>
     public bool Remove(string key)
