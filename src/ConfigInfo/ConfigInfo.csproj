@@ -20,5 +20,25 @@
 
         <Product>ConfigInfo</Product>
         <Description>面向 AOT 的轻量文本配置库（.cif 格式）：核心零反射、单遍解析、宽松类型转换，支持注释读写、自动注释与可选自动对象映射。</Description>
+
+        <!-- ===== NuGet 包 ===== -->
+        <PackageId>ConfigInfo</PackageId>
+        <Title>ConfigInfo</Title>
+        <Authors>daipeng0809</Authors>
+        <Copyright>Copyright (c) 2026 daipeng0809</Copyright>
+        <PackageTags>cif;configuration;config;aot;nativeaot;serial;dotnet</PackageTags>
+        <PackageProjectUrl>https://github.com/daipeng0809/ConfigInfo</PackageProjectUrl>
+        <RepositoryUrl>https://github.com/daipeng0809/ConfigInfo.git</RepositoryUrl>
+        <RepositoryType>git</RepositoryType>
+        <PublishRepositoryUrl>true</PublishRepositoryUrl>
+        <PackageLicenseExpression>MIT</PackageLicenseExpression>
+        <PackageRequireLicenseAcceptance>false</PackageRequireLicenseAcceptance>
+        <PackageReadmeFile>README.md</PackageReadmeFile>
+        <IsPackable>true</IsPackable>
     </PropertyGroup>
+
+    <ItemGroup>
+        <None Include="..\..\README.md" Pack="true" PackagePath="\" />
+        <None Include="..\..\LICENSE" Pack="true" PackagePath="\" />
+    </ItemGroup>
 </Project>

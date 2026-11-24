@@ -3,6 +3,8 @@
 **面向 NativeAOT 的 .cif 文本配置库（核心零反射，另带一行式自动映射）**  
 A `.cif` text configuration library with a zero-reflection core and an optional one-line object mapper.
 
+[![NuGet](https://img.shields.io/nuget/v/ConfigInfo.svg)](https://www.nuget.org/packages/ConfigInfo)
+
 [中文说明](#中文说明) · [English Manual](#english-manual)
 
 ---
@@ -76,7 +78,15 @@ A `.cif` text configuration library with a zero-reflection core and an optional 
 $env:DOTNET_ROLL_FORWARD = 'LatestMajor'
 ```
 
-### 3.2 项目引用
+### 3.2 安装与项目引用
+
+通过 NuGet 安装（推荐）：
+
+```powershell
+dotnet add package ConfigInfo
+```
+
+或直接引用项目：
 
 ```xml
 <ItemGroup>
@@ -84,7 +94,7 @@ $env:DOTNET_ROLL_FORWARD = 'LatestMajor'
 </ItemGroup>
 ```
 
-或引用编译产物 `ConfigInfo.dll`。
+也可以引用编译产物 `ConfigInfo.dll`。
 
 ### 3.3 最小示例
 
@@ -1101,13 +1111,23 @@ The library targets `net8.0`, ships as a single assembly, and has no third-party
 $env:DOTNET_ROLL_FORWARD = 'LatestMajor'
 ```
 
-### 3.2 Reference the project
+### 3.2 Install and reference
+
+Install from NuGet (recommended):
+
+```powershell
+dotnet add package ConfigInfo
+```
+
+Or reference the project directly:
 
 ```xml
 <ItemGroup>
   <ProjectReference Include="..\src\ConfigInfo\ConfigInfo.csproj" />
 </ItemGroup>
 ```
+
+You can also reference the compiled `ConfigInfo.dll`.
 
 ### 3.3 Minimal example
 
@@ -2034,5 +2054,5 @@ Format compatibility notes:
 
 ---
 
-**License / 许可证**: Not declared in this repository.  
+**License / 许可证**: [MIT](LICENSE)  
 **Version / 版本**: 1.2.0 · **Target / 目标框架**: `net8.0`
